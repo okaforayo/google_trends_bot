@@ -448,7 +448,7 @@ tbody tr:hover { background: rgba(255,255,255,0.02); }
     <h3>Tambah negara kustom</h3>
     <input type="text" id="customFlag" placeholder="Emoji bendera (misal: 🇹🇭)" maxlength="4">
     <input type="text" id="customName" placeholder="Nama negara (misal: Thailand)">
-    <input type="text" id="customCode" placeholder="Kode geo (misal: TH)" maxlength="5" style="text-transform:uppercase">
+    <input type="text" id="customCode" placeholder="Kode geo (misal: TH)" maxlength="2" style="text-transform:uppercase">
     <div class="modal-btns">
       <button class="btn-sm" onclick="closeModal()">Batal</button>
       <button class="btn-sm primary" onclick="addCustomCountry()">Tambah</button>
@@ -565,8 +565,7 @@ tbody tr:hover { background: rgba(255,255,255,0.02); }
             <input type="text" id="searchInput" placeholder="cari keyword..." oninput="applyFilters()">
           </div>
           <div class="export-btns">
-            <button class="export-btn" onclick="exportData('csv')">↓ CSV</button>
-            <button class="export-btn" onclick="exportData('json')">↓ JSON</button>
+            <button class="export-btn" onclick="exportData()">↓ Export</button>
           </div>
         </div>
         <div class="table-wrap">
@@ -639,9 +638,10 @@ let sortDir   = 1;
 let filterGeo = 'ALL';
 let searchQ   = '';
 let page      = 1;
-const PER_PAGE = 25;
 let isRunning = false;
 let logLines  = [];
+// B2: PER_PAGE dinamis — baca dari cfgRows saat render, bukan const
+function getPerPage() { return parseInt(document.getElementById('cfgRows').value) || 25; }
 
 // ── RENDER SIDEBAR ────────────────────────────────────────────────────────────
 function renderSidebar() {
@@ -678,6 +678,7 @@ function addCustomCountry() {
   const name = document.getElementById('customName').value.trim();
   const code = document.getElementById('customCode').value.trim().toUpperCase();
   if (!name || !code) { alert('Nama dan kode wajib diisi'); return; }
+  if (!/^[A-Z]{2}$/.test(code)) { alert('Kode harus tepat 2 huruf (A-Z), contoh: TH, PH, VN'); return; }
   if (countries.find(c => c.code === code)) { alert('Kode sudah ada'); return; }
   countries.push({ flag, name, code });
   closeModal();
@@ -688,20 +689,22 @@ function addCustomCountry() {
 // ── SCRAPING SIMULATION ───────────────────────────────────────────────────────
 function log(msg, type='') {
   const ts = new Date().toLocaleTimeString('id-ID',{hour12:false});
+  if (logLines.length >= 80) logLines.shift();  // B8: trim SEBELUM push
   logLines.push(`<div class="log-line"><span class="ts">[${ts}]</span><span class="${type}">${msg}</span></div>`);
-  if (logLines.length > 80) logLines.shift();
   const el = document.getElementById('logConsole');
   el.innerHTML = logLines.join('');
   el.scrollTop = el.scrollHeight;
 }
 
 async function startScraping() {
+  if (isRunning) return;  // B7: guard di baris pertama, blok double-click race condition
   const sel = [...selected];
   if (!sel.length) { alert('Pilih minimal 1 negara'); return; }
-  if (isRunning) return;
-  isRunning = true;
+  isRunning = true;  // B7: set SEBELUM async ops
   allData = [];
   filtered = [];
+  filterGeo = 'ALL';  // B4: reset stale filter dari run sebelumnya
+  page = 1;           // B4: reset page
   page = 1;
 
   document.getElementById('runBtn').disabled = true;
@@ -726,37 +729,76 @@ async function startScraping() {
   }).join('');
 
   log(`Memulai scraping ${sel.length} negara...`, 'info');
-  log(`Config: rows=${document.getElementById('cfgRows').value}, hours=${document.getElementById('cfgHours').value}`, '');
+  log(`Config: rows=${document.getElementById('cfgRows').value}, hours=${document.getElementById('cfgHours').value}, mode=${document.getElementById('cfgMode').value}`, '');
 
-  for (let i = 0; i < sel.length; i++) {
-    const code = sel[i];
-    const c = countries.find(x => x.code === code);
-    document.getElementById('pis-'+code).textContent = 'Berjalan...';
-    document.getElementById('pis-'+code).className = 'pi-status running';
-    document.getElementById('overallProgress').textContent = (i+1)+' / '+sel.length;
-    log(`[${code}] Membuka browser headless...`, 'info');
-    await sleep(300 + Math.random()*200);
-    log(`[${code}] URL: trends.google.com/trending?geo=${code}`, '');
+  const cfgMode = document.getElementById('cfgMode').value;
 
-    const total  = 50 + Math.floor(Math.random()*60);
-    const pages  = Math.ceil(total/parseInt(document.getElementById('cfgRows').value)) || 1;
+  if (cfgMode === 'parallel') {
+    // B6: Parallel mode — semua negara berjalan bersamaan
+    sel.forEach(code => {
+      const c = countries.find(x => x.code === code);
+      document.getElementById('pis-'+code).textContent = 'Berjalan...';
+      document.getElementById('pis-'+code).className = 'pi-status running';
+    });
+    document.getElementById('overallProgress').textContent = sel.length + ' / ' + sel.length;
 
-    for (let pg = 1; pg <= pages; pg++) {
-      await sleep(400 + Math.random()*600);
-      const pct = Math.round((pg/pages)*100);
-      document.getElementById('pib-'+code).style.width = pct+'%';
-      log(`[${code}] Halaman ${pg}/${pages} — parsing baris...`, '');
-      const perPage = Math.floor(total/pages) + (pg===pages ? total%pages : 0);
-      generateRows(code, c, perPage, pg);
-      document.getElementById('pis-'+code).textContent = `Hal ${pg}/${pages} — ${allData.filter(d=>d.geo===code).length} kw`;
-      updateSummary();
+    const scrapeOne = async (code) => {
+      const c = countries.find(x => x.code === code);
+      log(`[${code}] Membuka browser headless...`, 'info');
+      await sleep(300 + Math.random()*200);
+      log(`[${code}] URL: trends.google.com/trending?geo=${code}`, '');
+      const total  = 50 + Math.floor(Math.random()*60);
+      const pages  = Math.ceil(total/parseInt(document.getElementById('cfgRows').value)) || 1;
+      for (let pg = 1; pg <= pages; pg++) {
+        await sleep(400 + Math.random()*600);
+        const pct = Math.round((pg/pages)*100);
+        document.getElementById('pib-'+code).style.width = pct+'%';
+        log(`[${code}] Halaman ${pg}/${pages} — parsing baris...`, '');
+        const perPage = Math.floor(total/pages) + (pg===pages ? total%pages : 0);
+        generateRows(code, c, perPage, pg);
+        document.getElementById('pis-'+code).textContent = `Hal ${pg}/${pages} — ${allData.filter(d=>d.geo===code).length} kw`;
+        updateSummary();
+      }
+      document.getElementById('pib-'+code).classList.add('done');
+      document.getElementById('pis-'+code).textContent = `✓ Selesai — ${allData.filter(d=>d.geo===code).length} kw`;
+      document.getElementById('pis-'+code).className = 'pi-status done';
+      log(`[${code}] ✓ Selesai — ${allData.filter(d=>d.geo===code).length} keywords`, 'ok');
+    };
+
+    await Promise.all(sel.map(code => scrapeOne(code)));
+
+  } else {
+    // Sequential mode (original)
+    for (let i = 0; i < sel.length; i++) {
+      const code = sel[i];
+      const c = countries.find(x => x.code === code);
+      document.getElementById('pis-'+code).textContent = 'Berjalan...';
+      document.getElementById('pis-'+code).className = 'pi-status running';
+      document.getElementById('overallProgress').textContent = (i+1)+' / '+sel.length;
+      log(`[${code}] Membuka browser headless...`, 'info');
+      await sleep(300 + Math.random()*200);
+      log(`[${code}] URL: trends.google.com/trending?geo=${code}`, '');
+
+      const total  = 50 + Math.floor(Math.random()*60);
+      const pages  = Math.ceil(total/parseInt(document.getElementById('cfgRows').value)) || 1;
+
+      for (let pg = 1; pg <= pages; pg++) {
+        await sleep(400 + Math.random()*600);
+        const pct = Math.round((pg/pages)*100);
+        document.getElementById('pib-'+code).style.width = pct+'%';
+        log(`[${code}] Halaman ${pg}/${pages} — parsing baris...`, '');
+        const perPage = Math.floor(total/pages) + (pg===pages ? total%pages : 0);
+        generateRows(code, c, perPage, pg);
+        document.getElementById('pis-'+code).textContent = `Hal ${pg}/${pages} — ${allData.filter(d=>d.geo===code).length} kw`;
+        updateSummary();
+      }
+
+      document.getElementById('pib-'+code).classList.add('done');
+      document.getElementById('pis-'+code).textContent = `✓ Selesai — ${allData.filter(d=>d.geo===code).length} kw`;
+      document.getElementById('pis-'+code).className = 'pi-status done';
+      log(`[${code}] ✓ Selesai — ${allData.filter(d=>d.geo===code).length} keywords`, 'ok');
+      await sleep(200);
     }
-
-    document.getElementById('pib-'+code).classList.add('done');
-    document.getElementById('pis-'+code).textContent = `✓ Selesai — ${allData.filter(d=>d.geo===code).length} kw`;
-    document.getElementById('pis-'+code).className = 'pi-status done';
-    log(`[${code}] ✓ Selesai — ${allData.filter(d=>d.geo===code).length} keywords`, 'ok');
-    await sleep(200);
   }
 
   document.getElementById('liveDot').style.animation='none';
@@ -847,6 +889,7 @@ function sortData() {
 }
 
 function renderTable() {
+  const PER_PAGE = getPerPage();  // B2: dinamis dari dropdown
   const start = (page-1)*PER_PAGE;
   const rows  = filtered.slice(start, start+PER_PAGE);
   const tbody = document.getElementById('tableBody');
@@ -870,6 +913,7 @@ function renderTable() {
 }
 
 function renderPagination() {
+  const PER_PAGE = getPerPage();  // B2: konsisten dengan renderTable
   const total = Math.ceil(filtered.length/PER_PAGE);
   const bar   = document.getElementById('paginationBar');
   if (total<=1) { bar.innerHTML=''; return; }
@@ -894,19 +938,20 @@ function esc(s) {
 }
 
 // ── EXPORT ────────────────────────────────────────────────────────────────────
-function exportData(fmt) {
+function exportData(fmtOverride) {
+  // B5: baca cfgExport jika tidak ada override eksplisit
+  const fmt = fmtOverride || document.getElementById('cfgExport').value;
   const src = filtered.length ? filtered : allData;
   if (!src.length) { alert('Tidak ada data untuk diekspor'); return; }
   const ts  = new Date().toISOString().slice(0,19).replace(/[T:]/g,'-');
 
-  if (fmt==='json') {
-    const blob = new Blob([JSON.stringify(src, null, 2)], {type:'application/json'});
-    dl(blob, `trending_${ts}.json`);
-  } else {
+  if (fmt === 'csv' || fmt === 'both') {
     const keys = Object.keys(src[0]);
     const csv  = [keys.join(','), ...src.map(r=>keys.map(k=>'"'+(r[k]||'').toString().replace(/"/g,'""')+'"').join(','))].join('\n');
-    const blob = new Blob([csv], {type:'text/csv'});
-    dl(blob, `trending_${ts}.csv`);
+    dl(new Blob([csv], {type:'text/csv'}), `trending_${ts}.csv`);
+  }
+  if (fmt === 'json' || fmt === 'both') {
+    dl(new Blob([JSON.stringify(src, null, 2)], {type:'application/json'}), `trending_${ts}.json`);
   }
 }
 
